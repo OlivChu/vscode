@@ -8,7 +8,8 @@ import nls = require('vs/nls');
 import { BaseBinaryResourceEditor } from 'vs/workbench/browser/parts/editor/binaryEditor';
 import { BINARY_FILE_EDITOR_ID } from 'vs/workbench/parts/files/common/files';
 import { ITelemetryService } from 'vs/platform/telemetry/common/telemetry';
-import { IWorkbenchEditorService } from 'vs/workbench/services/editor/common/editorService';
+import { IThemeService } from 'vs/platform/theme/common/themeService';
+import { IWindowsService } from 'vs/platform/windows/common/windows';
 
 /**
  * An implementation of editor for binary files like images.
@@ -19,12 +20,13 @@ export class BinaryFileEditor extends BaseBinaryResourceEditor {
 
 	constructor(
 		@ITelemetryService telemetryService: ITelemetryService,
-		@IWorkbenchEditorService editorService: IWorkbenchEditorService
+		@IThemeService themeService: IThemeService,
+		@IWindowsService windowsService: IWindowsService
 	) {
-		super(BinaryFileEditor.ID, telemetryService, editorService);
+		super(BinaryFileEditor.ID, telemetryService, themeService, windowsService);
 	}
 
 	public getTitle(): string {
-		return this.getInput() ? this.getInput().getName() : nls.localize('binaryFileEditor', "Binary File Viewer");
+		return this.input ? this.input.getName() : nls.localize('binaryFileEditor', "Binary File Viewer");
 	}
 }

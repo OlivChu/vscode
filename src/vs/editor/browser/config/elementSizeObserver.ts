@@ -6,9 +6,8 @@
 
 import { Disposable } from 'vs/base/common/lifecycle';
 import { IDimension } from 'vs/editor/common/editorCommon';
-import { IElementSizeObserver } from 'vs/editor/common/config/commonEditorConfig';
 
-export class ElementSizeObserver extends Disposable implements IElementSizeObserver {
+export class ElementSizeObserver extends Disposable {
 
 	private referenceDomElement: HTMLElement;
 	private measureReferenceDomElementToken: number;
@@ -57,8 +56,8 @@ export class ElementSizeObserver extends Disposable implements IElementSizeObser
 	}
 
 	private measureReferenceDomElement(callChangeCallback: boolean, dimension?: IDimension): void {
-		var observedWidth = 0;
-		var observedHeight = 0;
+		let observedWidth = 0;
+		let observedHeight = 0;
 		if (dimension) {
 			observedWidth = dimension.width;
 			observedHeight = dimension.height;

@@ -42,8 +42,14 @@ export class ContextMenuHandler {
 
 		let hideViewOnRun = false;
 
-		this.toDispose.push(this.actionRunner.addListener2(EventType.BEFORE_RUN, (e: any) => {
+		this.toDispose.push(this.actionRunner.addListener(EventType.BEFORE_RUN, (e: any) => {
 			if (this.telemetryService) {
+				/* __GDPR__
+					"workbenchActionExecuted" : {
+						"id" : { "classification": "SystemMetaData", "purpose": "FeatureInsight" },
+						"from": { "classification": "SystemMetaData", "purpose": "FeatureInsight" }
+					}
+				*/
 				this.telemetryService.publicLog('workbenchActionExecuted', { id: e.action.id, from: 'contextMenu' });
 			}
 
@@ -54,7 +60,7 @@ export class ContextMenuHandler {
 			}
 		}));
 
-		this.toDispose.push(this.actionRunner.addListener2(EventType.RUN, (e: any) => {
+		this.toDispose.push(this.actionRunner.addListener(EventType.RUN, (e: any) => {
 			if (hideViewOnRun) {
 				this.contextViewService.hideContextView(false);
 			}
@@ -99,11 +105,11 @@ export class ContextMenuHandler {
 						actionRunner: this.actionRunner
 					});
 
-					let listener1 = menu.addListener2(EventType.CANCEL, (e: any) => {
+					let listener1 = menu.addListener(EventType.CANCEL, (e: any) => {
 						this.contextViewService.hideContextView(true);
 					});
 
-					let listener2 = menu.addListener2(EventType.BLUR, (e: any) => {
+					let listener2 = menu.addListener(EventType.BLUR, (e: any) => {
 						this.contextViewService.hideContextView(true);
 					});
 

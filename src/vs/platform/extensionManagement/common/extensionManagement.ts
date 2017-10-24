@@ -5,14 +5,14 @@
 
 'use strict';
 
-import nls = require('vs/nls');
+import { localize } from 'vs/nls';
 import { TPromise } from 'vs/base/common/winjs.base';
 import Event from 'vs/base/common/event';
 import { IPager } from 'vs/base/common/paging';
 import { createDecorator } from 'vs/platform/instantiation/common/instantiation';
-import { IRequestContext } from 'vs/base/node/request';
 
-export const EXTENSION_IDENTIFIER_PATTERN = '^[a-z0-9A-Z][a-z0-9\-A-Z]*\\.[a-z0-9A-Z][a-z0-9\-A-Z]*$';
+export const EXTENSION_IDENTIFIER_PATTERN = '^([a-z0-9A-Z][a-z0-9\-A-Z]*)\\.([a-z0-9A-Z][a-z0-9\-A-Z]*)$';
+export const EXTENSION_IDENTIFIER_REGEX = new RegExp(EXTENSION_IDENTIFIER_PATTERN);
 
 export interface ICommand {
 	command: string;
@@ -74,6 +74,17 @@ export interface ITheme {
 	label: string;
 }
 
+export interface IView {
+	id: string;
+	name: string;
+}
+
+export interface IColor {
+	id: string;
+	description: string;
+	defaults: { light: string, dark: string, highContrast: string };
+}
+
 export interface IExtensionContributions {
 	commands?: ICommand[];
 	configuration?: IConfiguration;
@@ -85,6 +96,9 @@ export interface IExtensionContributions {
 	menus?: { [context: string]: IMenu[] };
 	snippets?: ISnippet[];
 	themes?: ITheme[];
+	iconThemes?: ITheme[];
+	views?: { [location: string]: IView[] };
+	colors: IColor[];
 }
 
 export interface IExtensionManifest {
@@ -98,12 +112,8 @@ export interface IExtensionManifest {
 	icon?: string;
 	categories?: string[];
 	activationEvents?: string[];
+	extensionDependencies?: string[];
 	contributes?: IExtensionContributions;
-}
-
-export interface IExtensionIdentity {
-	name: string;
-	publisher: string;
 }
 
 export interface IGalleryExtensionProperties {
@@ -111,17 +121,22 @@ export interface IGalleryExtensionProperties {
 	engine?: string;
 }
 
+export interface IGalleryExtensionAsset {
+	uri: string;
+	fallbackUri: string;
+}
+
 export interface IGalleryExtensionAssets {
-	manifest: string;
-	readme: string;
-	changelog: string;
-	download: string;
-	icon: string;
-	iconFallback: string;
-	license: string;
+	manifest: IGalleryExtensionAsset;
+	readme: IGalleryExtensionAsset;
+	changelog: IGalleryExtensionAsset;
+	download: IGalleryExtensionAsset;
+	icon: IGalleryExtensionAsset;
+	license: IGalleryExtensionAsset;
 }
 
 export interface IGalleryExtension {
+	uuid: string;
 	id: string;
 	name: string;
 	version: string;
@@ -136,6 +151,7 @@ export interface IGalleryExtension {
 	ratingCount: number;
 	assets: IGalleryExtensionAssets;
 	properties: IGalleryExtensionProperties;
+	telemetryData: any;
 }
 
 export interface IGalleryMetadata {
@@ -169,7 +185,8 @@ export enum SortBy {
 	PublisherName = 3,
 	InstallCount = 4,
 	PublishedDate = 5,
-	AverageRating = 6
+	AverageRating = 6,
+	WeightedRating = 12
 }
 
 export enum SortOrder {
@@ -185,6 +202,11 @@ export interface IQueryOptions {
 	pageSize?: number;
 	sortBy?: SortBy;
 	sortOrder?: SortOrder;
+	source?: string;
+}
+
+export enum StatisticType {
+	Uninstall = 'uninstall'
 }
 
 export interface IExtensionGalleryService {
@@ -192,7 +214,10 @@ export interface IExtensionGalleryService {
 	isEnabled(): boolean;
 	query(options?: IQueryOptions): TPromise<IPager<IGalleryExtension>>;
 	download(extension: IGalleryExtension): TPromise<string>;
-	getAsset(url: string): TPromise<IRequestContext>;
+	reportStatistic(publisher: string, name: string, version: string, type: StatisticType): TPromise<void>;
+	getReadme(extension: IGalleryExtension): TPromise<string>;
+	getManifest(extension: IGalleryExtension): TPromise<IExtensionManifest>;
+	getChangelog(extension: IGalleryMetadata): TPromise<string>;
 	loadCompatibleVersion(extension: IGalleryExtension): TPromise<IGalleryExtension>;
 	getAllDependencies(extension: IGalleryExtension): TPromise<IGalleryExtension[]>;
 }
@@ -208,7 +233,12 @@ export interface DidInstallExtensionEvent {
 	zipPath?: string;
 	gallery?: IGalleryExtension;
 	local?: ILocalExtension;
-	error?: Error;
+	error?: string;
+}
+
+export interface DidUninstallExtensionEvent {
+	id: string;
+	error?: string;
 }
 
 export interface IExtensionManagementService {
@@ -217,21 +247,65 @@ export interface IExtensionManagementService {
 	onInstallExtension: Event<InstallExtensionEvent>;
 	onDidInstallExtension: Event<DidInstallExtensionEvent>;
 	onUninstallExtension: Event<string>;
-	onDidUninstallExtension: Event<string>;
+	onDidUninstallExtension: Event<DidUninstallExtensionEvent>;
 
 	install(zipPath: string): TPromise<void>;
-	installFromGallery(extension: IGalleryExtension, promptToInstallDependencies?: boolean): TPromise<void>;
-	uninstall(extension: ILocalExtension): TPromise<void>;
+	installFromGallery(extension: IGalleryExtension): TPromise<void>;
+	uninstall(extension: ILocalExtension, force?: boolean): TPromise<void>;
 	getInstalled(type?: LocalExtensionType): TPromise<ILocalExtension[]>;
+}
+
+export const IExtensionEnablementService = createDecorator<IExtensionEnablementService>('extensionEnablementService');
+
+// TODO: @sandy: Merge this into IExtensionManagementService when we have a storage service available in Shared process
+export interface IExtensionEnablementService {
+	_serviceBrand: any;
+
+	/**
+	 * Event to listen on for extension enablement changes
+	 */
+	onEnablementChanged: Event<string>;
+
+	/**
+	 * Returns all globally disabled extension identifiers.
+	 * Returns an empty array if none exist.
+	 */
+	getGloballyDisabledExtensions(): string[];
+
+	/**
+	 * Returns all workspace disabled extension identifiers.
+	 * Returns an empty array if none exist or workspace does not exist.
+	 */
+	getWorkspaceDisabledExtensions(): string[];
+
+	/**
+	 * Returns `true` if given extension can be enabled by calling `setEnablement`, otherwise false`.
+	 */
+	canEnable(identifier: string): boolean;
+
+	/**
+	 * Enable or disable the given extension.
+	 * if `workspace` is `true` then enablement is done for workspace, otherwise globally.
+	 *
+	 * Returns a promise that resolves to boolean value.
+	 * if resolves to `true` then requires restart for the change to take effect.
+	 *
+	 * Throws error if enablement is requested for workspace and there is no workspace
+	 */
+	setEnablement(identifier: string, enable: boolean, workspace?: boolean): TPromise<boolean>;
 }
 
 export const IExtensionTipsService = createDecorator<IExtensionTipsService>('extensionTipsService');
 
 export interface IExtensionTipsService {
 	_serviceBrand: any;
-	getRecommendations(): string[];
-	getWorkspaceRecommendations(): string[];
+	getRecommendations(installedExtensions: string[], searchText: string): string[];
+	getWorkspaceRecommendations(): TPromise<string[]>;
+	getKeymapRecommendations(): string[];
+	getKeywordsForExtension(extension: string): string[];
+	getRecommendationsForExtension(extension: string): string[];
 }
 
-export const ExtensionsLabel = nls.localize('extensions', "Extensions");
+export const ExtensionsLabel = localize('extensions', "Extensions");
 export const ExtensionsChannelId = 'extensions';
+export const PreferencesLabel = localize('preferences', "Preferences");

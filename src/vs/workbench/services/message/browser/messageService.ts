@@ -6,14 +6,13 @@
 
 import errors = require('vs/base/common/errors');
 import { toErrorMessage } from 'vs/base/common/errorMessage';
-import { TPromise } from 'vs/base/common/winjs.base';
 import types = require('vs/base/common/types');
-import { MessageList, Severity as BaseSeverity } from 'vs/workbench/services/message/browser/messagelist/messageList';
-import { IDisposable } from 'vs/base/common/lifecycle';
-import { IMessageService, IChoiceService, IMessageWithAction, IConfirmation, Severity } from 'vs/platform/message/common/message';
+import { MessageList, Severity as BaseSeverity } from 'vs/workbench/services/message/browser/messageList';
+import { IDisposable, dispose } from 'vs/base/common/lifecycle';
+import { IMessageService, IMessageWithAction, IConfirmation, Severity, IConfirmationResult } from 'vs/platform/message/common/message';
 import { ITelemetryService } from 'vs/platform/telemetry/common/telemetry';
 import Event from 'vs/base/common/event';
-import { Action } from 'vs/base/common/actions';
+import { TPromise } from 'vs/base/common/winjs.base';
 
 interface IBufferedMessage {
 	severity: Severity;
@@ -22,12 +21,12 @@ interface IBufferedMessage {
 	disposeFn: () => void;
 }
 
-export class WorkbenchMessageService implements IMessageService, IChoiceService {
+export class WorkbenchMessageService implements IMessageService {
 
 	public _serviceBrand: any;
 
 	private handler: MessageList;
-	private disposeables: IDisposable[];
+	private toDispose: IDisposable[];
 
 	private canShowMessages: boolean;
 	private messageBuffer: IBufferedMessage[];
@@ -37,10 +36,9 @@ export class WorkbenchMessageService implements IMessageService, IChoiceService 
 		telemetryService: ITelemetryService
 	) {
 		this.handler = new MessageList(container, telemetryService);
-
 		this.messageBuffer = [];
 		this.canShowMessages = true;
-		this.disposeables = [];
+		this.toDispose = [this.handler];
 	}
 
 	public get onMessagesShowing(): Event<void> {
@@ -138,7 +136,7 @@ export class WorkbenchMessageService implements IMessageService, IChoiceService 
 		}
 	}
 
-	public confirm(confirmation: IConfirmation): boolean {
+	public confirmSync(confirmation: IConfirmation): boolean {
 		let messageText = confirmation.message;
 		if (confirmation.detail) {
 			messageText = messageText + '\n\n' + confirmation.detail;
@@ -147,26 +145,11 @@ export class WorkbenchMessageService implements IMessageService, IChoiceService 
 		return window.confirm(messageText);
 	}
 
-	choose(severity: Severity, message: string, options: string[]): TPromise<number> {
-		let onCancel = null;
-
-		const promise = new TPromise((c, e) => {
-			const callback = index => () => {
-				c(index);
-				return TPromise.as(true);
-			};
-
-			const actions = options.map((option, index) => new Action('?', option, '', true, callback(index)));
-
-			onCancel = this.show(severity, { message, actions }, () => promise.cancel());
-		}, () => onCancel());
-
-		return promise;
+	public confirm(confirmation: IConfirmation): TPromise<IConfirmationResult> {
+		return TPromise.as({ confirmed: this.confirmSync(confirmation) } as IConfirmationResult);
 	}
 
 	public dispose(): void {
-		while (this.disposeables.length) {
-			this.disposeables.pop().dispose();
-		}
+		this.toDispose = dispose(this.toDispose);
 	}
 }

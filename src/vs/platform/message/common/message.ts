@@ -13,6 +13,7 @@ import { Action } from 'vs/base/common/actions';
 export interface IMessageWithAction {
 	message: string;
 	actions: Action[];
+	source?: string;
 }
 
 export interface IConfirmation {
@@ -22,6 +23,10 @@ export interface IConfirmation {
 	detail?: string;
 	primaryButton?: string;
 	secondaryButton?: string;
+	checkbox?: {
+		label: string;
+		checked?: boolean;
+	};
 }
 
 export const CloseAction = new Action('close.message', nls.localize('close', "Close"), null, true, () => TPromise.as(true));
@@ -29,6 +34,11 @@ export const LaterAction = new Action('later.message', nls.localize('later', "La
 export const CancelAction = new Action('cancel.message', nls.localize('cancel', "Cancel"), null, true, () => TPromise.as(true));
 
 export const IMessageService = createDecorator<IMessageService>('messageService');
+
+export interface IConfirmationResult {
+	confirmed: boolean;
+	checkboxChecked?: boolean;
+}
 
 export interface IMessageService {
 
@@ -52,7 +62,12 @@ export interface IMessageService {
 	/**
 	 * Ask the user for confirmation.
 	 */
-	confirm(confirmation: IConfirmation): boolean;
+	confirmSync(confirmation: IConfirmation): boolean;
+
+	/**
+	 * Ask the user for confirmation without blocking.
+	 */
+	confirm(confirmation: IConfirmation): TPromise<IConfirmationResult>;
 }
 
 export const IChoiceService = createDecorator<IChoiceService>('choiceService');
@@ -64,11 +79,17 @@ export interface IChoiceService {
 	/**
 	 * Prompt the user for a choice between multiple options.
 	 *
+	 * @param when `modal` is true, this will block the user until chooses.
+	 *
 	 * @returns A promise with the selected choice index. The promise is cancellable
 	 * which hides the message. The promise can return an error, meaning that
 	 * the user refused to choose.
+	 *
+	 * When `modal` is true and user refused to choose, then promise with index of
+	 * `Cancel` option is returned. If there is no such option then promise with
+	 * `0` index is returned.
 	 */
-	choose(severity: Severity, message: string, options: string[]): TPromise<number>;
+	choose(severity: Severity, message: string, options: string[], cancelId: number, modal?: boolean): TPromise<number>;
 }
 
 export import Severity = Severity;

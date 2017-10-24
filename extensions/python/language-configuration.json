@@ -9,11 +9,11 @@
 		["(", ")"]
 	],
 	"autoClosingPairs": [
-		["{", "}"],
-		["[", "]"],
-		["(", ")"],
-		["\"", "\""],
-		["'", "'"]
+		{ "open": "{", "close": "}" },
+		{ "open": "[", "close": "]" },
+		{ "open": "(", "close": ")" },
+		{ "open": "\"", "close": "\"", "notIn": ["string"] },
+		{ "open": "'", "close": "'", "notIn": ["string", "comment"] }
 	],
 	"surroundingPairs": [
 		["{", "}"],
@@ -21,6 +21,12 @@
 		["(", ")"],
 		["\"", "\""],
 		["'", "'"]
-	]
-	// enhancedBrackets: [ { open: /.*:\s*$/,  closeComplete: 'else:' } ],
+	],
+	"folding": {
+		"offSide": true,
+		"markers": {
+			"start": "^\\s*#region\\b",
+			"end": "^\\s*#endregion\\b"
+		}
+	}
 }

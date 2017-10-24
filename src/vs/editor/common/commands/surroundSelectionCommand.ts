@@ -20,14 +20,14 @@ export class SurroundSelectionCommand implements ICommand {
 	}
 
 	public getEditOperations(model: ITokenizedModel, builder: IEditOperationBuilder): void {
-		builder.addEditOperation(new Range(
+		builder.addTrackedEditOperation(new Range(
 			this._range.startLineNumber,
 			this._range.startColumn,
 			this._range.startLineNumber,
 			this._range.startColumn
 		), this._charBeforeSelection);
 
-		builder.addEditOperation(new Range(
+		builder.addTrackedEditOperation(new Range(
 			this._range.endLineNumber,
 			this._range.endColumn,
 			this._range.endLineNumber,
@@ -36,9 +36,9 @@ export class SurroundSelectionCommand implements ICommand {
 	}
 
 	public computeCursorState(model: ITokenizedModel, helper: ICursorStateComputerData): Selection {
-		var inverseEditOperations = helper.getInverseEditOperations();
-		var firstOperationRange = inverseEditOperations[0].range;
-		var secondOperationRange = inverseEditOperations[1].range;
+		let inverseEditOperations = helper.getInverseEditOperations();
+		let firstOperationRange = inverseEditOperations[0].range;
+		let secondOperationRange = inverseEditOperations[1].range;
 
 		return new Selection(
 			firstOperationRange.endLineNumber,

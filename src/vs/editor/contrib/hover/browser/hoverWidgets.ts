@@ -8,11 +8,11 @@ import { KeyCode } from 'vs/base/common/keyCodes';
 import { IKeyboardEvent } from 'vs/base/browser/keyboardEvent';
 import { toggleClass } from 'vs/base/browser/dom';
 import { Position } from 'vs/editor/common/core/position';
-import { IPosition, IConfigurationChangedEvent } from 'vs/editor/common/editorCommon';
 import * as editorBrowser from 'vs/editor/browser/editorBrowser';
 import { Widget } from 'vs/base/browser/ui/widget';
 import { DomScrollableElement } from 'vs/base/browser/ui/scrollbar/scrollableElement';
 import { IDisposable, dispose } from 'vs/base/common/lifecycle';
+import { IConfigurationChangedEvent } from 'vs/editor/common/config/editorOptions';
 
 export class ContentHoverWidget extends Widget implements editorBrowser.IContentWidget {
 
@@ -51,7 +51,7 @@ export class ContentHoverWidget extends Widget implements editorBrowser.IContent
 		this._domNode = document.createElement('div');
 		this._domNode.className = 'monaco-editor-hover-content';
 
-		this.scrollbar = new DomScrollableElement(this._domNode, { canUseTranslate3d: false });
+		this.scrollbar = new DomScrollableElement(this._domNode, {});
 		this.disposables.push(this.scrollbar);
 		this._containerDomNode.appendChild(this.scrollbar.getDomNode());
 
@@ -82,7 +82,7 @@ export class ContentHoverWidget extends Widget implements editorBrowser.IContent
 		return this._containerDomNode;
 	}
 
-	public showAt(position: IPosition, focus: boolean): void {
+	public showAt(position: Position, focus: boolean): void {
 		// Position has changed
 		this._showAtPosition = new Position(position.lineNumber, position.column);
 		this.isVisible = true;
@@ -147,7 +147,10 @@ export class ContentHoverWidget extends Widget implements editorBrowser.IContent
 
 	private updateMaxHeight(): void {
 		const height = Math.max(this._editor.getLayoutInfo().height / 4, 250);
+		const { fontSize, lineHeight } = this._editor.getConfiguration().fontInfo;
 
+		this._domNode.style.fontSize = `${fontSize}px`;
+		this._domNode.style.lineHeight = `${lineHeight}px`;
 		this._domNode.style.maxHeight = `${height}px`;
 	}
 }

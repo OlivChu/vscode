@@ -5,11 +5,15 @@
 
 'use strict';
 
-export interface IIterator<T> {
+export interface IIterator<E> {
+	next(): { done: boolean, value: E };
+}
+
+export interface INextIterator<T> {
 	next(): T;
 }
 
-export class ArrayIterator<T> implements IIterator<T> {
+export class ArrayIterator<T> implements INextIterator<T> {
 
 	private items: T[];
 	protected start: number;
@@ -21,6 +25,11 @@ export class ArrayIterator<T> implements IIterator<T> {
 		this.start = start;
 		this.end = end;
 		this.index = start - 1;
+	}
+
+	public first(): T {
+		this.index = this.start;
+		return this.current();
 	}
 
 	public next(): T {
@@ -68,21 +77,22 @@ export class ArrayNavigator<T> extends ArrayIterator<T> implements INavigator<T>
 
 }
 
-export class MappedIterator<T, R> implements IIterator<R> {
+export class MappedIterator<T, R> implements INextIterator<R> {
 
-	constructor(protected iterator: IIterator<T>, protected fn: (item: T) => R) {
+	constructor(protected iterator: INextIterator<T>, protected fn: (item: T) => R) {
 		// noop
 	}
 
 	next() { return this.fn(this.iterator.next()); }
 }
 
-export interface INavigator<T> extends IIterator<T> {
+export interface INavigator<T> extends INextIterator<T> {
 	current(): T;
 	previous(): T;
 	parent(): T;
 	first(): T;
 	last(): T;
+	next(): T;
 }
 
 export class MappedNavigator<T, R> extends MappedIterator<T, R> implements INavigator<R> {
@@ -96,4 +106,5 @@ export class MappedNavigator<T, R> extends MappedIterator<T, R> implements INavi
 	parent() { return this.fn(this.navigator.parent()); }
 	first() { return this.fn(this.navigator.first()); }
 	last() { return this.fn(this.navigator.last()); }
+	next() { return this.fn(this.navigator.next()); }
 }

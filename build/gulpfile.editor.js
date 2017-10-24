@@ -6,7 +6,7 @@
 var gulp = require('gulp');
 var path = require('path');
 var util = require('./lib/util');
-var common = require('./gulpfile.common');
+var common = require('./lib/optimize');
 var es = require('event-stream');
 var File = require('vinyl');
 
@@ -21,8 +21,8 @@ var editorEntryPoints = [
 	{
 		name: 'vs/editor/editor.main',
 		include: [],
-		exclude: [],
-		prepend: [ 'vs/css.js', 'vs/nls.js' ],
+		exclude: [ 'vs/css', 'vs/nls' ],
+		prepend: [ 'out-build/vs/css.js', 'out-build/vs/nls.js' ],
 	},
 	{
 		name: 'vs/base/common/worker/simpleWorker',
@@ -38,7 +38,6 @@ var editorResources = [
 	'!out-build/vs/base/browser/ui/splitview/**/*',
 	'!out-build/vs/base/browser/ui/toolbar/**/*',
 	'!out-build/vs/base/browser/ui/octiconLabel/**/*',
-	'!out-build/vs/editor/contrib/defineKeybinding/**/*',
 	'!out-build/vs/workbench/**',
 	'!**/test/**'
 ];
@@ -63,13 +62,16 @@ function editorLoaderConfig() {
 	result.paths['vs/base/browser/ui/octiconLabel/octiconLabel'] = 'out-build/vs/base/browser/ui/octiconLabel/octiconLabel.mock';
 
 	// force css inlining to use base64 -- see https://github.com/Microsoft/monaco-editor/issues/148
-	result['vs/css'] = { inlineResources: 'base64' };
+	result['vs/css'] = {
+		inlineResources: 'base64',
+		inlineResourcesLimit: 3000 // see https://github.com/Microsoft/monaco-editor/issues/336
+	};
 
 	return result;
 }
 
 gulp.task('clean-optimized-editor', util.rimraf('out-editor'));
-gulp.task('optimize-editor', ['clean-optimized-editor', 'compile-build'], common.optimizeTask({
+gulp.task('optimize-editor', ['clean-optimized-editor', 'compile-client-build'], common.optimizeTask({
 	entryPoints: editorEntryPoints,
 	otherSources: editorOtherSources,
 	resources: editorResources,

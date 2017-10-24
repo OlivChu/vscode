@@ -7,44 +7,78 @@
 import 'vs/css!./media/actions';
 import { TPromise } from 'vs/base/common/winjs.base';
 import nls = require('vs/nls');
-import { Registry } from 'vs/platform/platform';
+import { Registry } from 'vs/platform/registry/common/platform';
 import { Action } from 'vs/base/common/actions';
 import { SyncActionDescriptor } from 'vs/platform/actions/common/actions';
-import { IMessageService, Severity } from 'vs/platform/message/common/message';
-import { IWorkbenchActionRegistry, Extensions } from 'vs/workbench/common/actionRegistry';
-import { IConfigurationEditingService, ConfigurationTarget } from 'vs/workbench/services/configuration/common/configurationEditing';
-import { IConfigurationService } from 'vs/platform/configuration/common/configuration';
+import { IWorkbenchActionRegistry, Extensions } from 'vs/workbench/common/actions';
+import { KeyMod, KeyCode } from 'vs/base/common/keyCodes';
+import { IEditorGroupService, GroupOrientation } from 'vs/workbench/services/group/common/groupService';
+import { dispose, IDisposable } from 'vs/base/common/lifecycle';
+import { CommandsRegistry } from 'vs/platform/commands/common/commands';
+import { ServicesAccessor } from 'vs/platform/instantiation/common/instantiation';
 
 export class ToggleEditorLayoutAction extends Action {
 
-	public static ID = 'workbench.action.toggleEditorLayout';
-	public static LABEL = nls.localize('toggleEditorLayout', "Toggle Editor Layout");
+	public static ID = 'workbench.action.toggleEditorGroupLayout';
+	public static LABEL = nls.localize('toggleEditorGroupLayout', "Toggle Editor Group Vertical/Horizontal Layout");
 
-	private static editorLayoutConfigurationKey = 'workbench.editor.sideBySideLayout';
+	private toDispose: IDisposable[];
 
 	constructor(
 		id: string,
 		label: string,
-		@IMessageService private messageService: IMessageService,
-		@IConfigurationService private configurationService: IConfigurationService,
-		@IConfigurationEditingService private configurationEditingService: IConfigurationEditingService
+		@IEditorGroupService private editorGroupService: IEditorGroupService
 	) {
 		super(id, label);
 
+		this.toDispose = [];
+
 		this.class = 'toggle-editor-layout';
+		this.updateEnablement();
+		this.updateLabel();
+
+		this.registerListeners();
+	}
+
+	private registerListeners(): void {
+		this.toDispose.push(this.editorGroupService.onEditorsChanged(() => this.updateEnablement()));
+		this.toDispose.push(this.editorGroupService.onGroupOrientationChanged(() => this.updateLabel()));
+	}
+
+	private updateLabel(): void {
+		const editorGroupLayoutVertical = (this.editorGroupService.getGroupOrientation() !== 'horizontal');
+		this.label = editorGroupLayoutVertical ? nls.localize('horizontalLayout', "Horizontal Editor Group Layout") : nls.localize('verticalLayout', "Vertical Editor Group Layout");
+	}
+
+	private updateEnablement(): void {
+		this.enabled = this.editorGroupService.getStacksModel().groups.length > 0;
 	}
 
 	public run(): TPromise<any> {
-		const editorLayoutVertical = this.configurationService.lookup('workbench.editor.sideBySideLayout').value !== 'horizontal';
-		const newEditorLayout = editorLayoutVertical ? 'horizontal' : 'vertical';
+		const groupOrientiation = this.editorGroupService.getGroupOrientation();
+		const newGroupOrientation: GroupOrientation = (groupOrientiation === 'vertical') ? 'horizontal' : 'vertical';
 
-		this.configurationEditingService.writeConfiguration(ConfigurationTarget.USER, { key: ToggleEditorLayoutAction.editorLayoutConfigurationKey, value: newEditorLayout }).then(null, error => {
-			this.messageService.show(Severity.Error, error);
-		});
+		this.editorGroupService.setGroupOrientation(newGroupOrientation);
 
 		return TPromise.as(null);
 	}
+
+	public dispose(): void {
+		this.toDispose = dispose(this.toDispose);
+
+		super.dispose();
+	}
 }
 
+CommandsRegistry.registerCommand('_workbench.editor.setGroupOrientation', function (accessor: ServicesAccessor, args: [GroupOrientation]) {
+	const editorGroupService = accessor.get(IEditorGroupService);
+	const [orientation] = args;
+
+	editorGroupService.setGroupOrientation(orientation);
+
+	return TPromise.as<void>(null);
+});
+
 const registry = Registry.as<IWorkbenchActionRegistry>(Extensions.WorkbenchActions);
-registry.registerWorkbenchAction(new SyncActionDescriptor(ToggleEditorLayoutAction, ToggleEditorLayoutAction.ID, ToggleEditorLayoutAction.LABEL), 'View: Toggle Editor Layout', nls.localize('view', "View"));
+const group = nls.localize('view', "View");
+registry.registerWorkbenchAction(new SyncActionDescriptor(ToggleEditorLayoutAction, ToggleEditorLayoutAction.ID, ToggleEditorLayoutAction.LABEL, { primary: KeyMod.Shift | KeyMod.Alt | KeyCode.KEY_1, mac: { primary: KeyMod.CtrlCmd | KeyMod.Alt | KeyCode.KEY_1 } }), 'View: Toggle Editor Group Vertical/Horizontal Layout', group);

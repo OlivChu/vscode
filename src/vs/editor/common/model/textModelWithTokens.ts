@@ -8,70 +8,54 @@ import * as nls from 'vs/nls';
 import { onUnexpectedError } from 'vs/base/common/errors';
 import { IDisposable } from 'vs/base/common/lifecycle';
 import { StopWatch } from 'vs/base/common/stopwatch';
-import * as timer from 'vs/base/common/timer';
 import { Range } from 'vs/editor/common/core/range';
 import * as editorCommon from 'vs/editor/common/editorCommon';
-import { ModelLine } from 'vs/editor/common/model/modelLine';
 import { TextModel } from 'vs/editor/common/model/textModel';
-import { WordHelper } from 'vs/editor/common/model/textModelWithTokensHelpers';
-import { TokenIterator } from 'vs/editor/common/model/tokenIterator';
-import { ITokenizationSupport, ILineContext, ILineTokens, IMode, IState, TokenizationRegistry, IRichEditBrackets } from 'vs/editor/common/modes';
-import { NULL_MODE_ID, nullTokenize } from 'vs/editor/common/modes/nullMode';
+import { ITokenizationSupport, IState, TokenizationRegistry, LanguageId, LanguageIdentifier } from 'vs/editor/common/modes';
+import { NULL_LANGUAGE_IDENTIFIER, nullTokenize2 } from 'vs/editor/common/modes/nullMode';
 import { ignoreBracketsInToken } from 'vs/editor/common/modes/supports';
-import { BracketsUtils } from 'vs/editor/common/modes/supports/richEditBrackets';
-import { ModeTransition } from 'vs/editor/common/core/modeTransition';
-import { TokensInflatorMap } from 'vs/editor/common/model/tokensBinaryEncoding';
-import { Position } from 'vs/editor/common/core/position';
+import { BracketsUtils, RichEditBrackets, RichEditBracket } from 'vs/editor/common/modes/supports/richEditBrackets';
+import { Position, IPosition } from 'vs/editor/common/core/position';
 import { LanguageConfigurationRegistry } from 'vs/editor/common/modes/languageConfigurationRegistry';
-import { Token } from 'vs/editor/common/core/token';
 import { LineTokens, LineToken } from 'vs/editor/common/core/lineTokens';
+import { getWordAtText } from 'vs/editor/common/model/wordHelper';
+import { TokenizationResult2 } from 'vs/editor/common/core/token';
+import { ITextSource, IRawTextSource } from 'vs/editor/common/model/textSource';
+import * as textModelEvents from 'vs/editor/common/model/textModelEvents';
+import { IndentRange, computeRanges } from 'vs/editor/common/model/indentRanges';
 
-class Mode implements IMode {
+class ModelTokensChangedEventBuilder {
 
-	private _languageId: string;
+	private _ranges: { fromLineNumber: number; toLineNumber: number; }[];
 
-	constructor(languageId: string) {
-		this._languageId = languageId;
+	constructor() {
+		this._ranges = [];
 	}
 
-	getId(): string {
-		return this._languageId;
-	}
-}
+	public registerChangedTokens(lineNumber: number): void {
+		const ranges = this._ranges;
+		const rangesLength = ranges.length;
+		const previousRange = rangesLength > 0 ? ranges[rangesLength - 1] : null;
 
-/**
- * TODO@Alex: remove this wrapper
- */
-class LineContext implements ILineContext {
-
-	public modeTransitions: ModeTransition[];
-	private _text: string;
-	private _lineTokens: LineTokens;
-
-	constructor(topLevelModeId: string, line: ModelLine, map: TokensInflatorMap) {
-		this.modeTransitions = line.getModeTransitions(topLevelModeId);
-		this._text = line.text;
-		this._lineTokens = line.getTokens(map);
+		if (previousRange && previousRange.toLineNumber === lineNumber - 1) {
+			// extend previous range
+			previousRange.toLineNumber++;
+		} else {
+			// insert new range
+			ranges[rangesLength] = {
+				fromLineNumber: lineNumber,
+				toLineNumber: lineNumber
+			};
+		}
 	}
 
-	public getLineContent(): string {
-		return this._text;
-	}
-
-	public getTokenCount(): number {
-		return this._lineTokens.getTokenCount();
-	}
-
-	public getTokenStartOffset(tokenIndex: number): number {
-		return this._lineTokens.getTokenStartOffset(tokenIndex);
-	}
-
-	public getTokenType(tokenIndex: number): string {
-		return this._lineTokens.getTokenType(tokenIndex);
-	}
-
-	public findIndexOfOffset(offset: number): number {
-		return this._lineTokens.findTokenIndexAtOffset(offset);
+	public build(): textModelEvents.IModelTokensChangedEvent {
+		if (this._ranges.length === 0) {
+			return null;
+		}
+		return {
+			ranges: this._ranges
+		};
 	}
 }
 
@@ -79,45 +63,58 @@ export class TextModelWithTokens extends TextModel implements editorCommon.IToke
 
 	private static MODE_TOKENIZATION_FAILED_MSG = nls.localize('mode.tokenizationSupportFailed', "The mode has failed while tokenizing the input.");
 
-	private _languageId: string;
+	private _languageIdentifier: LanguageIdentifier;
 	private _tokenizationListener: IDisposable;
 	private _tokenizationSupport: ITokenizationSupport;
-	private _tokensInflatorMap: TokensInflatorMap;
 
 	private _invalidLineStartIndex: number;
 	private _lastState: IState;
 
+	private _indentRanges: IndentRange[];
+	private _languageRegistryListener: IDisposable;
+
 	private _revalidateTokensTimeout: number;
 
-	constructor(allowedEventTypes: string[], rawText: editorCommon.IRawText, languageId: string) {
-		allowedEventTypes.push(editorCommon.EventType.ModelTokensChanged);
-		allowedEventTypes.push(editorCommon.EventType.ModelModeChanged);
-		super(allowedEventTypes, rawText);
+	constructor(rawTextSource: IRawTextSource, creationOptions: editorCommon.ITextModelCreationOptions, languageIdentifier: LanguageIdentifier) {
+		super(rawTextSource, creationOptions);
 
-		this._languageId = languageId || NULL_MODE_ID;
+		this._languageIdentifier = languageIdentifier || NULL_LANGUAGE_IDENTIFIER;
 		this._tokenizationListener = TokenizationRegistry.onDidChange((e) => {
-			if (e.languageId !== this._languageId) {
+			if (e.changedLanguages.indexOf(this._languageIdentifier.language) === -1) {
 				return;
 			}
 
 			this._resetTokenizationState();
-			this.emitModelTokensChangedEvent(1, this.getLineCount());
-		});
-		this._tokensInflatorMap = null;
+			this.emitModelTokensChangedEvent({
+				ranges: [{
+					fromLineNumber: 1,
+					toLineNumber: this.getLineCount()
+				}]
+			});
 
-		this._invalidLineStartIndex = 0;
-		this._lastState = null;
+			if (this._shouldAutoTokenize()) {
+				this._warmUpTokens();
+			}
+		});
 
 		this._revalidateTokensTimeout = -1;
 
+		this._languageRegistryListener = LanguageConfigurationRegistry.onDidChange((e) => {
+			if (e.languageIdentifier.id === this._languageIdentifier.id) {
+				this._resetIndentRanges();
+				this._emitModelLanguageConfigurationEvent({});
+			}
+		});
+
 		this._resetTokenizationState();
+		this._resetIndentRanges();
 	}
 
 	public dispose(): void {
 		this._tokenizationListener.dispose();
+		this._languageRegistryListener.dispose();
 		this._clearTimers();
 		this._lastState = null;
-		this._tokensInflatorMap = null;
 
 		super.dispose();
 	}
@@ -126,10 +123,11 @@ export class TextModelWithTokens extends TextModel implements editorCommon.IToke
 		return false;
 	}
 
-	protected _resetValue(e: editorCommon.IModelContentChangedFlushEvent, newValue: editorCommon.IRawText): void {
-		super._resetValue(e, newValue);
+	protected _resetValue(newValue: ITextSource): void {
+		super._resetValue(newValue);
 		// Cancel tokenization, clear all tokens and begin tokenizing
 		this._resetTokenizationState();
+		this._resetIndentRanges();
 	}
 
 	protected _resetTokenizationState(): void {
@@ -139,8 +137,8 @@ export class TextModelWithTokens extends TextModel implements editorCommon.IToke
 		}
 
 		this._tokenizationSupport = null;
-		if (!this.isTooLargeForHavingAMode()) {
-			this._tokenizationSupport = TokenizationRegistry.get(this._languageId);
+		if (!this._isTooLargeForTokenization) {
+			this._tokenizationSupport = TokenizationRegistry.get(this._languageIdentifier.language);
 		}
 
 		if (this._tokenizationSupport) {
@@ -159,7 +157,6 @@ export class TextModelWithTokens extends TextModel implements editorCommon.IToke
 		}
 
 		this._lastState = null;
-		this._tokensInflatorMap = new TokensInflatorMap(this.getModeId());
 		this._invalidLineStartIndex = 0;
 		this._beginBackgroundTokenization();
 	}
@@ -171,83 +168,105 @@ export class TextModelWithTokens extends TextModel implements editorCommon.IToke
 		}
 	}
 
-	public getLineTokens(lineNumber: number, inaccurateTokensAcceptable: boolean = false): LineTokens {
+	private _withModelTokensChangedEventBuilder<T>(callback: (eventBuilder: ModelTokensChangedEventBuilder) => T): T {
+		let eventBuilder = new ModelTokensChangedEventBuilder();
+
+		let result = callback(eventBuilder);
+
+		if (!this._isDisposing) {
+			let e = eventBuilder.build();
+			if (e) {
+				this._eventEmitter.emit(textModelEvents.TextModelEventType.ModelTokensChanged, e);
+			}
+		}
+
+		return result;
+	}
+
+	public forceTokenization(lineNumber: number): void {
 		if (lineNumber < 1 || lineNumber > this.getLineCount()) {
 			throw new Error('Illegal value ' + lineNumber + ' for `lineNumber`');
 		}
 
-		if (!inaccurateTokensAcceptable) {
-			this._updateTokensUntilLine(lineNumber, true);
-		}
-		return this._lines[lineNumber - 1].getTokens(this._tokensInflatorMap);
+		this._withModelTokensChangedEventBuilder((eventBuilder) => {
+			this._updateTokensUntilLine(eventBuilder, lineNumber);
+		});
 	}
 
-	public getLineContext(lineNumber: number): ILineContext {
+	public isCheapToTokenize(lineNumber: number): boolean {
+		const firstInvalidLineNumber = this._invalidLineStartIndex + 1;
+		return (firstInvalidLineNumber >= lineNumber);
+	}
+
+	public tokenizeIfCheap(lineNumber: number): void {
+		if (this.isCheapToTokenize(lineNumber)) {
+			this.forceTokenization(lineNumber);
+		}
+	}
+
+	public getLineTokens(lineNumber: number): LineTokens {
 		if (lineNumber < 1 || lineNumber > this.getLineCount()) {
 			throw new Error('Illegal value ' + lineNumber + ' for `lineNumber`');
 		}
 
-		this._updateTokensUntilLine(lineNumber, true);
-
-		return new LineContext(this.getModeId(), this._lines[lineNumber - 1], this._tokensInflatorMap);
+		return this._getLineTokens(lineNumber);
 	}
 
-	public getMode(): IMode {
-		return new Mode(this._languageId);
+	private _getLineTokens(lineNumber: number): LineTokens {
+		return this._lines[lineNumber - 1].getTokens(this._languageIdentifier.id);
+	}
+
+	public getLanguageIdentifier(): LanguageIdentifier {
+		return this._languageIdentifier;
 	}
 
 	public getModeId(): string {
-		return this.getMode().getId();
+		return this._languageIdentifier.language;
 	}
 
-	public setMode(languageId: string): void {
-		if (this._languageId === languageId) {
+	public setMode(languageIdentifier: LanguageIdentifier): void {
+		if (this._languageIdentifier.id === languageIdentifier.id) {
 			// There's nothing to do
 			return;
 		}
 
-		let e: editorCommon.IModelModeChangedEvent = {
-			oldMode: new Mode(this._languageId),
-			newMode: new Mode(languageId)
+		let e: textModelEvents.IModelLanguageChangedEvent = {
+			oldLanguage: this._languageIdentifier.language,
+			newLanguage: languageIdentifier.language
 		};
 
-		this._languageId = languageId;
+		this._languageIdentifier = languageIdentifier;
 
 		// Cancel tokenization, clear all tokens and begin tokenizing
 		this._resetTokenizationState();
+		this._resetIndentRanges();
 
-		this.emitModelTokensChangedEvent(1, this.getLineCount());
+		this.emitModelTokensChangedEvent({
+			ranges: [{
+				fromLineNumber: 1,
+				toLineNumber: this.getLineCount()
+			}]
+		});
 		this._emitModelModeChangedEvent(e);
+		this._emitModelLanguageConfigurationEvent({});
 	}
 
-	public getModeIdAtPosition(_lineNumber: number, _column: number): string {
+	public getLanguageIdAtPosition(_lineNumber: number, _column: number): LanguageId {
 		if (!this._tokenizationSupport) {
-			return this.getModeId();
+			return this._languageIdentifier.id;
 		}
-		var validPosition = this.validatePosition({
-			lineNumber: _lineNumber,
-			column: _column
-		});
+		let { lineNumber, column } = this.validatePosition({ lineNumber: _lineNumber, column: _column });
 
-		var lineNumber = validPosition.lineNumber;
-		var column = validPosition.column;
-
-		if (column === 1) {
-			return this.getStateBeforeLine(lineNumber).getModeId();
-		} else if (column === this.getLineMaxColumn(lineNumber)) {
-			return this.getStateAfterLine(lineNumber).getModeId();
-		} else {
-			var modeTransitions = this._getLineModeTransitions(lineNumber);
-			var modeTransitionIndex = ModeTransition.findIndexInSegmentsArray(modeTransitions, column - 1);
-			return modeTransitions[modeTransitionIndex].modeId;
-		}
+		let lineTokens = this._getLineTokens(lineNumber);
+		let token = lineTokens.findTokenAtOffset(column - 1);
+		return token.languageId;
 	}
 
 	protected _invalidateLine(lineIndex: number): void {
-		this._lines[lineIndex].isInvalid = true;
+		this._lines[lineIndex].setIsInvalid(true);
 		if (lineIndex < this._invalidLineStartIndex) {
 			if (this._invalidLineStartIndex < this._lines.length) {
-				this._lines[this._invalidLineStartIndex].isInvalid = true;
+				this._lines[this._invalidLineStartIndex].setIsInvalid(true);
 			}
 			this._invalidLineStartIndex = lineIndex;
 			this._beginBackgroundTokenization();
@@ -266,16 +285,7 @@ export class TextModelWithTokens extends TextModel implements editorCommon.IToke
 	_warmUpTokens(): void {
 		// Warm up first 100 lines (if it takes less than 50ms)
 		var maxLineNumber = Math.min(100, this.getLineCount());
-		var toLineNumber = maxLineNumber;
-		for (var lineNumber = 1; lineNumber <= maxLineNumber; lineNumber++) {
-			var text = this._lines[lineNumber - 1].text;
-			if (text.length >= 200) {
-				// This line is over 200 chars long, so warm up without it
-				toLineNumber = lineNumber - 1;
-				break;
-			}
-		}
-		this._revalidateTokensNow(toLineNumber);
+		this._revalidateTokensNow(maxLineNumber);
 
 		if (this._invalidLineStartIndex < this._lines.length) {
 			this._beginBackgroundTokenization();
@@ -284,135 +294,95 @@ export class TextModelWithTokens extends TextModel implements editorCommon.IToke
 
 	private _revalidateTokensNow(toLineNumber: number = this._invalidLineStartIndex + 1000000): void {
 
-		var t1 = timer.start(timer.Topic.EDITOR, 'backgroundTokenization');
-		toLineNumber = Math.min(this._lines.length, toLineNumber);
+		this._withModelTokensChangedEventBuilder((eventBuilder) => {
 
-		var MAX_ALLOWED_TIME = 20,
-			fromLineNumber = this._invalidLineStartIndex + 1,
-			tokenizedChars = 0,
-			currentCharsToTokenize = 0,
-			currentEstimatedTimeToTokenize = 0,
-			sw = StopWatch.create(false),
-			elapsedTime: number;
+			toLineNumber = Math.min(this._lines.length, toLineNumber);
 
-		// Tokenize at most 1000 lines. Estimate the tokenization speed per character and stop when:
-		// - MAX_ALLOWED_TIME is reached
-		// - tokenizing the next line would go above MAX_ALLOWED_TIME
+			var MAX_ALLOWED_TIME = 20,
+				fromLineNumber = this._invalidLineStartIndex + 1,
+				tokenizedChars = 0,
+				currentCharsToTokenize = 0,
+				currentEstimatedTimeToTokenize = 0,
+				sw = StopWatch.create(false),
+				elapsedTime: number;
 
-		for (var lineNumber = fromLineNumber; lineNumber <= toLineNumber; lineNumber++) {
-			elapsedTime = sw.elapsed();
-			if (elapsedTime > MAX_ALLOWED_TIME) {
-				// Stop if MAX_ALLOWED_TIME is reached
-				toLineNumber = lineNumber - 1;
-				break;
-			}
+			// Tokenize at most 1000 lines. Estimate the tokenization speed per character and stop when:
+			// - MAX_ALLOWED_TIME is reached
+			// - tokenizing the next line would go above MAX_ALLOWED_TIME
 
-			// Compute how many characters will be tokenized for this line
-			currentCharsToTokenize = this._lines[lineNumber - 1].text.length;
-
-			if (tokenizedChars > 0) {
-				// If we have enough history, estimate how long tokenizing this line would take
-				currentEstimatedTimeToTokenize = (elapsedTime / tokenizedChars) * currentCharsToTokenize;
-				if (elapsedTime + currentEstimatedTimeToTokenize > MAX_ALLOWED_TIME) {
-					// Tokenizing this line will go above MAX_ALLOWED_TIME
+			for (var lineNumber = fromLineNumber; lineNumber <= toLineNumber; lineNumber++) {
+				elapsedTime = sw.elapsed();
+				if (elapsedTime > MAX_ALLOWED_TIME) {
+					// Stop if MAX_ALLOWED_TIME is reached
 					toLineNumber = lineNumber - 1;
 					break;
 				}
+
+				// Compute how many characters will be tokenized for this line
+				currentCharsToTokenize = this._lines[lineNumber - 1].text.length;
+
+				if (tokenizedChars > 0) {
+					// If we have enough history, estimate how long tokenizing this line would take
+					currentEstimatedTimeToTokenize = (elapsedTime / tokenizedChars) * currentCharsToTokenize;
+					if (elapsedTime + currentEstimatedTimeToTokenize > MAX_ALLOWED_TIME) {
+						// Tokenizing this line will go above MAX_ALLOWED_TIME
+						toLineNumber = lineNumber - 1;
+						break;
+					}
+				}
+
+				this._updateTokensUntilLine(eventBuilder, lineNumber);
+				tokenizedChars += currentCharsToTokenize;
+
+				// Skip the lines that got tokenized
+				lineNumber = Math.max(lineNumber, this._invalidLineStartIndex + 1);
 			}
 
-			this._updateTokensUntilLine(lineNumber, false);
-			tokenizedChars += currentCharsToTokenize;
-		}
+			elapsedTime = sw.elapsed();
 
-		elapsedTime = sw.elapsed();
-
-		if (fromLineNumber <= toLineNumber) {
-			this.emitModelTokensChangedEvent(fromLineNumber, toLineNumber);
-		}
-
-		if (this._invalidLineStartIndex < this._lines.length) {
-			this._beginBackgroundTokenization();
-		}
-
-		t1.stop();
+			if (this._invalidLineStartIndex < this._lines.length) {
+				this._beginBackgroundTokenization();
+			}
+		});
 	}
 
-	private getStateBeforeLine(lineNumber: number): IState {
-		this._updateTokensUntilLine(lineNumber - 1, true);
-		return this._lines[lineNumber - 1].getState();
-	}
-
-	private getStateAfterLine(lineNumber: number): IState {
-		this._updateTokensUntilLine(lineNumber, true);
-		return lineNumber < this._lines.length ? this._lines[lineNumber].getState() : this._lastState;
-	}
-
-	_getLineModeTransitions(lineNumber: number): ModeTransition[] {
-		if (lineNumber < 1 || lineNumber > this.getLineCount()) {
-			throw new Error('Illegal value ' + lineNumber + ' for `lineNumber`');
-		}
-		this._updateTokensUntilLine(lineNumber, true);
-		return this._lines[lineNumber - 1].getModeTransitions(this.getModeId());
-	}
-
-	private _updateTokensUntilLine(lineNumber: number, emitEvents: boolean): void {
+	private _updateTokensUntilLine(eventBuilder: ModelTokensChangedEventBuilder, lineNumber: number): void {
 		if (!this._tokenizationSupport) {
 			this._invalidLineStartIndex = this._lines.length;
 			return;
 		}
 
-		var linesLength = this._lines.length;
-		var endLineIndex = lineNumber - 1;
-		var stopLineTokenizationAfter = 1000000000; // 1 billion, if a line is so long, you have other trouble :).
-
-		var fromLineNumber = this._invalidLineStartIndex + 1, toLineNumber = lineNumber;
+		const linesLength = this._lines.length;
+		const endLineIndex = lineNumber - 1;
 
 		// Validate all states up to and including endLineIndex
-		for (var lineIndex = this._invalidLineStartIndex; lineIndex <= endLineIndex; lineIndex++) {
-			var endStateIndex = lineIndex + 1;
-			var r: ILineTokens = null;
-			var text = this._lines[lineIndex].text;
+		for (let lineIndex = this._invalidLineStartIndex; lineIndex <= endLineIndex; lineIndex++) {
+			const endStateIndex = lineIndex + 1;
+			let r: TokenizationResult2 = null;
+			const text = this._lines[lineIndex].text;
 
 			try {
 				// Tokenize only the first X characters
-				r = this._tokenizationSupport.tokenize(this._lines[lineIndex].text, this._lines[lineIndex].getState(), 0, stopLineTokenizationAfter);
+				let freshState = this._lines[lineIndex].getState().clone();
+				r = this._tokenizationSupport.tokenize2(this._lines[lineIndex].text, freshState, 0);
 			} catch (e) {
 				e.friendlyMessage = TextModelWithTokens.MODE_TOKENIZATION_FAILED_MSG;
 				onUnexpectedError(e);
 			}
 
-			if (r && r.tokens && r.tokens.length > 0) {
-				// Cannot have a stop offset before the last token
-				r.actualStopOffset = Math.max(r.actualStopOffset, r.tokens[r.tokens.length - 1].startIndex + 1);
-			}
-
-			if (r && r.actualStopOffset < text.length) {
-				// Treat the rest of the line (if above limit) as one default token
-				r.tokens.push(new Token(r.actualStopOffset, ''));
-
-				// Use as end state the starting state
-				r.endState = this._lines[lineIndex].getState();
-			}
-
 			if (!r) {
-				r = nullTokenize(this.getModeId(), text, this._lines[lineIndex].getState());
+				r = nullTokenize2(this._languageIdentifier.id, text, this._lines[lineIndex].getState(), 0);
 			}
-			if (!r.modeTransitions) {
-				r.modeTransitions = [];
-			}
-			if (r.modeTransitions.length === 0) {
-				// Make sure there is at least the transition to the top-most mode
-				r.modeTransitions.push(new ModeTransition(0, this.getModeId()));
-			}
-			this._lines[lineIndex].setTokens(this._tokensInflatorMap, r.tokens, r.modeTransitions);
-			this._lines[lineIndex].isInvalid = false;
+			this._lines[lineIndex].setTokens(this._languageIdentifier.id, r.tokens);
+			eventBuilder.registerChangedTokens(lineIndex + 1);
+			this._lines[lineIndex].setIsInvalid(false);
 
 			if (endStateIndex < linesLength) {
 				if (this._lines[endStateIndex].getState() !== null && r.endState.equals(this._lines[endStateIndex].getState())) {
 					// The end state of this line remains the same
-					var nextInvalidLineIndex = lineIndex + 1;
+					let nextInvalidLineIndex = lineIndex + 1;
 					while (nextInvalidLineIndex < linesLength) {
-						if (this._lines[nextInvalidLineIndex].isInvalid) {
+						if (this._lines[nextInvalidLineIndex].isInvalid()) {
 							break;
 						}
 						if (nextInvalidLineIndex + 1 < linesLength) {
@@ -436,43 +406,70 @@ export class TextModelWithTokens extends TextModel implements editorCommon.IToke
 			}
 		}
 		this._invalidLineStartIndex = Math.max(this._invalidLineStartIndex, endLineIndex + 1);
+	}
 
-		if (emitEvents && fromLineNumber <= toLineNumber) {
-			this.emitModelTokensChangedEvent(fromLineNumber, toLineNumber);
+	private emitModelTokensChangedEvent(e: textModelEvents.IModelTokensChangedEvent): void {
+		if (!this._isDisposing) {
+			this._eventEmitter.emit(textModelEvents.TextModelEventType.ModelTokensChanged, e);
 		}
 	}
 
-	private emitModelTokensChangedEvent(fromLineNumber: number, toLineNumber: number): void {
-		var e: editorCommon.IModelTokensChangedEvent = {
-			fromLineNumber: fromLineNumber,
-			toLineNumber: toLineNumber
-		};
+	private _emitModelLanguageConfigurationEvent(e: textModelEvents.IModelLanguageConfigurationChangedEvent): void {
 		if (!this._isDisposing) {
-			this.emit(editorCommon.EventType.ModelTokensChanged, e);
+			this._eventEmitter.emit(textModelEvents.TextModelEventType.ModelLanguageConfigurationChanged, e);
 		}
 	}
 
-	private _emitModelModeChangedEvent(e: editorCommon.IModelModeChangedEvent): void {
+	private _emitModelModeChangedEvent(e: textModelEvents.IModelLanguageChangedEvent): void {
 		if (!this._isDisposing) {
-			this.emit(editorCommon.EventType.ModelModeChanged, e);
+			this._eventEmitter.emit(textModelEvents.TextModelEventType.ModelLanguageChanged, e);
 		}
 	}
 
 	// Having tokens allows implementing additional helper methods
 
-	_lineIsTokenized(lineNumber: number): boolean {
-		return this._invalidLineStartIndex > lineNumber - 1;
+	public getWordAtPosition(_position: IPosition): editorCommon.IWordAtPosition {
+		this._assertNotDisposed();
+		let position = this.validatePosition(_position);
+		let lineContent = this.getLineContent(position.lineNumber);
+
+		if (this._invalidLineStartIndex <= position.lineNumber) {
+			// this line is not tokenized
+			return getWordAtText(
+				position.column,
+				LanguageConfigurationRegistry.getWordDefinition(this._languageIdentifier.id),
+				lineContent,
+				0
+			);
+		}
+
+		let lineTokens = this._getLineTokens(position.lineNumber);
+		let offset = position.column - 1;
+		let token = lineTokens.findTokenAtOffset(offset);
+
+		let result = getWordAtText(
+			position.column,
+			LanguageConfigurationRegistry.getWordDefinition(token.languageId),
+			lineContent.substring(token.startOffset, token.endOffset),
+			token.startOffset
+		);
+
+		if (!result && token.hasPrev && token.startOffset === offset) {
+			// The position is right at the beginning of `modeIndex`, so try looking at `modeIndex` - 1 too
+
+			let prevToken = token.prev();
+			result = getWordAtText(
+				position.column,
+				LanguageConfigurationRegistry.getWordDefinition(prevToken.languageId),
+				lineContent.substring(prevToken.startOffset, prevToken.endOffset),
+				prevToken.startOffset
+			);
+		}
+
+		return result;
 	}
 
-	protected _getWordDefinition(): RegExp {
-		return WordHelper.massageWordDefinitionOf(this.getModeId());
-	}
-
-	public getWordAtPosition(position: editorCommon.IPosition): editorCommon.IWordAtPosition {
-		return WordHelper.getWordAtPosition(this, this.validatePosition(position));
-	}
-
-	public getWordUntilPosition(position: editorCommon.IPosition): editorCommon.IWordAtPosition {
+	public getWordUntilPosition(position: IPosition): editorCommon.IWordAtPosition {
 		var wordAtPosition = this.getWordAtPosition(position);
 		if (!wordAtPosition) {
 			return {
@@ -488,27 +485,19 @@ export class TextModelWithTokens extends TextModel implements editorCommon.IToke
 		};
 	}
 
-	public tokenIterator(position: editorCommon.IPosition, callback: (it: TokenIterator) => any): any {
-		var iter = new TokenIterator(this, this.validatePosition(position));
-		var result = callback(iter);
-		iter._invalidate();
-		return result;
-	}
-
-	public findMatchingBracketUp(_bracket: string, _position: editorCommon.IPosition): Range {
+	public findMatchingBracketUp(_bracket: string, _position: IPosition): Range {
 		let bracket = _bracket.toLowerCase();
 		let position = this.validatePosition(_position);
 
-		let modeTransitions = this._lines[position.lineNumber - 1].getModeTransitions(this.getModeId());
-		let currentModeIndex = ModeTransition.findIndexInSegmentsArray(modeTransitions, position.column - 1);
-		let currentMode = modeTransitions[currentModeIndex];
-		let currentModeBrackets = LanguageConfigurationRegistry.getBracketsSupport(currentMode.modeId);
+		let lineTokens = this._getLineTokens(position.lineNumber);
+		let token = lineTokens.findTokenAtOffset(position.column - 1);
+		let bracketsSupport = LanguageConfigurationRegistry.getBracketsSupport(token.languageId);
 
-		if (!currentModeBrackets) {
+		if (!bracketsSupport) {
 			return null;
 		}
 
-		let data = currentModeBrackets.textIsBracket[bracket];
+		let data = bracketsSupport.textIsBracket[bracket];
 
 		if (!data) {
 			return null;
@@ -517,23 +506,23 @@ export class TextModelWithTokens extends TextModel implements editorCommon.IToke
 		return this._findMatchingBracketUp(data, position);
 	}
 
-	public matchBracket(position: editorCommon.IPosition): [Range, Range] {
+	public matchBracket(position: IPosition): [Range, Range] {
 		return this._matchBracket(this.validatePosition(position));
 	}
 
 	private _matchBracket(position: Position): [Range, Range] {
 		const lineNumber = position.lineNumber;
-		const lineTokens = this._lines[lineNumber - 1].getTokens(this._tokensInflatorMap);
+		let lineTokens = this._getLineTokens(lineNumber);
 		const lineText = this._lines[lineNumber - 1].text;
 
 		const currentToken = lineTokens.findTokenAtOffset(position.column - 1);
 		if (!currentToken) {
 			return null;
 		}
-		const currentModeBrackets = LanguageConfigurationRegistry.getBracketsSupport(currentToken.modeId);
+		const currentModeBrackets = LanguageConfigurationRegistry.getBracketsSupport(currentToken.languageId);
 
 		// check that the token is not to be ignored
-		if (currentModeBrackets && !ignoreBracketsInToken(currentToken.type)) {
+		if (currentModeBrackets && !ignoreBracketsInToken(currentToken.tokenType)) {
 			// limit search to not go before `maxBracketLength`
 			let searchStartOffset = Math.max(currentToken.startOffset, position.column - 1 - currentModeBrackets.maxBracketLength);
 			// limit search to not go after `maxBracketLength`
@@ -581,10 +570,10 @@ export class TextModelWithTokens extends TextModel implements editorCommon.IToke
 		// If position is in between two tokens, try also looking in the previous token
 		if (currentToken.hasPrev && currentToken.startOffset === position.column - 1) {
 			const prevToken = currentToken.prev();
-			const prevModeBrackets = LanguageConfigurationRegistry.getBracketsSupport(prevToken.modeId);
+			const prevModeBrackets = LanguageConfigurationRegistry.getBracketsSupport(prevToken.languageId);
 
 			// check that previous token is not to be ignored
-			if (prevModeBrackets && !ignoreBracketsInToken(prevToken.type)) {
+			if (prevModeBrackets && !ignoreBracketsInToken(prevToken.tokenType)) {
 				// limit search in case previous token is very large, there's no need to go beyond `maxBracketLength`
 				const searchStartOffset = Math.max(prevToken.startOffset, position.column - 1 - prevModeBrackets.maxBracketLength);
 				const searchEndOffset = currentToken.startOffset;
@@ -608,7 +597,7 @@ export class TextModelWithTokens extends TextModel implements editorCommon.IToke
 		return null;
 	}
 
-	private _matchFoundBracket(foundBracket: Range, data: editorCommon.IRichEditBracket, isOpen: boolean): [Range, Range] {
+	private _matchFoundBracket(foundBracket: Range, data: RichEditBracket, isOpen: boolean): [Range, Range] {
 		if (isOpen) {
 			let matched = this._findMatchingBracketDown(data, foundBracket.getEndPosition());
 			if (matched) {
@@ -624,15 +613,15 @@ export class TextModelWithTokens extends TextModel implements editorCommon.IToke
 		return null;
 	}
 
-	private _findMatchingBracketUp(bracket: editorCommon.IRichEditBracket, position: Position): Range {
+	private _findMatchingBracketUp(bracket: RichEditBracket, position: Position): Range {
 		// console.log('_findMatchingBracketUp: ', 'bracket: ', JSON.stringify(bracket), 'startPosition: ', String(position));
 
-		const modeId = bracket.modeId;
+		const languageId = bracket.languageIdentifier.id;
 		const reversedBracketRegex = bracket.reversedRegex;
 		let count = -1;
 
 		for (let lineNumber = position.lineNumber; lineNumber >= 1; lineNumber--) {
-			const lineTokens = this._lines[lineNumber - 1].getTokens(this._tokensInflatorMap);
+			const lineTokens = this._getLineTokens(lineNumber);
 			const lineText = this._lines[lineNumber - 1].text;
 
 			let currentToken: LineToken;
@@ -648,7 +637,7 @@ export class TextModelWithTokens extends TextModel implements editorCommon.IToke
 			}
 
 			while (currentToken) {
-				if (currentToken.modeId === modeId && !ignoreBracketsInToken(currentToken.type)) {
+				if (currentToken.languageId === languageId && !ignoreBracketsInToken(currentToken.tokenType)) {
 
 					while (true) {
 						let r = BracketsUtils.findPrevBracketInToken(reversedBracketRegex, lineNumber, lineText, currentToken.startOffset, searchStopOffset);
@@ -683,15 +672,15 @@ export class TextModelWithTokens extends TextModel implements editorCommon.IToke
 		return null;
 	}
 
-	private _findMatchingBracketDown(bracket: editorCommon.IRichEditBracket, position: Position): Range {
+	private _findMatchingBracketDown(bracket: RichEditBracket, position: Position): Range {
 		// console.log('_findMatchingBracketDown: ', 'bracket: ', JSON.stringify(bracket), 'startPosition: ', String(position));
 
-		const modeId = bracket.modeId;
+		const languageId = bracket.languageIdentifier.id;
 		const bracketRegex = bracket.forwardRegex;
 		let count = 1;
 
 		for (let lineNumber = position.lineNumber, lineCount = this.getLineCount(); lineNumber <= lineCount; lineNumber++) {
-			const lineTokens = this._lines[lineNumber - 1].getTokens(this._tokensInflatorMap);
+			const lineTokens = this._getLineTokens(lineNumber);
 			const lineText = this._lines[lineNumber - 1].text;
 
 			let currentToken: LineToken;
@@ -707,7 +696,7 @@ export class TextModelWithTokens extends TextModel implements editorCommon.IToke
 			}
 
 			while (currentToken) {
-				if (currentToken.modeId === modeId && !ignoreBracketsInToken(currentToken.type)) {
+				if (currentToken.languageId === languageId && !ignoreBracketsInToken(currentToken.tokenType)) {
 					while (true) {
 						let r = BracketsUtils.findNextBracketInToken(bracketRegex, lineNumber, lineText, searchStartOffset, currentToken.endOffset);
 						if (!r) {
@@ -741,13 +730,13 @@ export class TextModelWithTokens extends TextModel implements editorCommon.IToke
 		return null;
 	}
 
-	public findPrevBracket(_position: editorCommon.IPosition): editorCommon.IFoundBracket {
+	public findPrevBracket(_position: IPosition): editorCommon.IFoundBracket {
 		const position = this.validatePosition(_position);
 
-		let modeId: string = null;
-		let modeBrackets: IRichEditBrackets;
+		let languageId: LanguageId = -1;
+		let modeBrackets: RichEditBrackets = null;
 		for (let lineNumber = position.lineNumber; lineNumber >= 1; lineNumber--) {
-			const lineTokens = this._lines[lineNumber - 1].getTokens(this._tokensInflatorMap);
+			const lineTokens = this._getLineTokens(lineNumber);
 			const lineText = this._lines[lineNumber - 1].text;
 
 			let currentToken: LineToken;
@@ -763,11 +752,11 @@ export class TextModelWithTokens extends TextModel implements editorCommon.IToke
 			}
 
 			while (currentToken) {
-				if (modeId !== currentToken.modeId) {
-					modeId = currentToken.modeId;
-					modeBrackets = LanguageConfigurationRegistry.getBracketsSupport(modeId);
+				if (languageId !== currentToken.languageId) {
+					languageId = currentToken.languageId;
+					modeBrackets = LanguageConfigurationRegistry.getBracketsSupport(languageId);
 				}
-				if (modeBrackets && !ignoreBracketsInToken(currentToken.type)) {
+				if (modeBrackets && !ignoreBracketsInToken(currentToken.tokenType)) {
 					let r = BracketsUtils.findPrevBracketInToken(modeBrackets.reversedRegex, lineNumber, lineText, currentToken.startOffset, searchStopOffset);
 					if (r) {
 						return this._toFoundBracket(modeBrackets, r);
@@ -784,13 +773,13 @@ export class TextModelWithTokens extends TextModel implements editorCommon.IToke
 		return null;
 	}
 
-	public findNextBracket(_position: editorCommon.IPosition): editorCommon.IFoundBracket {
+	public findNextBracket(_position: IPosition): editorCommon.IFoundBracket {
 		const position = this.validatePosition(_position);
 
-		let modeId: string = null;
-		let modeBrackets: IRichEditBrackets;
+		let languageId: LanguageId = -1;
+		let modeBrackets: RichEditBrackets = null;
 		for (let lineNumber = position.lineNumber, lineCount = this.getLineCount(); lineNumber <= lineCount; lineNumber++) {
-			const lineTokens = this._lines[lineNumber - 1].getTokens(this._tokensInflatorMap);
+			const lineTokens = this._getLineTokens(lineNumber);
 			const lineText = this._lines[lineNumber - 1].text;
 
 			let currentToken: LineToken;
@@ -806,11 +795,11 @@ export class TextModelWithTokens extends TextModel implements editorCommon.IToke
 			}
 
 			while (currentToken) {
-				if (modeId !== currentToken.modeId) {
-					modeId = currentToken.modeId;
-					modeBrackets = LanguageConfigurationRegistry.getBracketsSupport(modeId);
+				if (languageId !== currentToken.languageId) {
+					languageId = currentToken.languageId;
+					modeBrackets = LanguageConfigurationRegistry.getBracketsSupport(languageId);
 				}
-				if (modeBrackets && !ignoreBracketsInToken(currentToken.type)) {
+				if (modeBrackets && !ignoreBracketsInToken(currentToken.tokenType)) {
 					let r = BracketsUtils.findNextBracketInToken(modeBrackets.forwardRegex, lineNumber, lineText, searchStartOffset, currentToken.endOffset);
 					if (r) {
 						return this._toFoundBracket(modeBrackets, r);
@@ -827,7 +816,7 @@ export class TextModelWithTokens extends TextModel implements editorCommon.IToke
 		return null;
 	}
 
-	private _toFoundBracket(modeBrackets: IRichEditBrackets, r: Range): editorCommon.IFoundBracket {
+	private _toFoundBracket(modeBrackets: RichEditBrackets, r: Range): editorCommon.IFoundBracket {
 		if (!r) {
 			return null;
 		}
@@ -846,5 +835,67 @@ export class TextModelWithTokens extends TextModel implements editorCommon.IToke
 			close: data.close,
 			isOpen: modeBrackets.textIsOpenBracket[text]
 		};
+	}
+
+	protected _resetIndentRanges(): void {
+		this._indentRanges = null;
+	}
+
+	private _getIndentRanges(): IndentRange[] {
+		if (!this._indentRanges) {
+			let foldingRules = LanguageConfigurationRegistry.getFoldingRules(this._languageIdentifier.id);
+			let offSide = foldingRules && foldingRules.offSide;
+			let markers = foldingRules && foldingRules.markers;
+			this._indentRanges = computeRanges(this, offSide, markers);
+		}
+		return this._indentRanges;
+	}
+
+	public getIndentRanges(): IndentRange[] {
+		this._assertNotDisposed();
+		let indentRanges = this._getIndentRanges();
+		return IndentRange.deepCloneArr(indentRanges);
+	}
+
+	public getLineIndentGuide(lineNumber: number): number {
+		this._assertNotDisposed();
+		if (lineNumber < 1 || lineNumber > this.getLineCount()) {
+			throw new Error('Illegal value ' + lineNumber + ' for `lineNumber`');
+		}
+
+		let indentRanges = this._getIndentRanges();
+
+		for (let i = indentRanges.length - 1; i >= 0; i--) {
+			let rng = indentRanges[i];
+
+			if (rng.startLineNumber === lineNumber) {
+				return this._toValidLineIndentGuide(lineNumber, Math.ceil(rng.indent / this._options.tabSize));
+			}
+			if (rng.startLineNumber < lineNumber && lineNumber <= rng.endLineNumber) {
+				return this._toValidLineIndentGuide(lineNumber, 1 + Math.floor(rng.indent / this._options.tabSize));
+			}
+			if (rng.endLineNumber + 1 === lineNumber) {
+				let bestIndent = rng.indent;
+				while (i > 0) {
+					i--;
+					rng = indentRanges[i];
+					if (rng.endLineNumber + 1 === lineNumber) {
+						bestIndent = rng.indent;
+					}
+				}
+				return this._toValidLineIndentGuide(lineNumber, Math.ceil(bestIndent / this._options.tabSize));
+			}
+		}
+
+		return 0;
+	}
+
+	private _toValidLineIndentGuide(lineNumber: number, indentGuide: number): number {
+		let lineIndentLevel = this._lines[lineNumber - 1].getIndentLevel();
+		if (lineIndentLevel === -1) {
+			return indentGuide;
+		}
+		let maxIndentGuide = Math.ceil(lineIndentLevel / this._options.tabSize);
+		return Math.min(maxIndentGuide, indentGuide);
 	}
 }

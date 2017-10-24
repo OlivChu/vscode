@@ -7,207 +7,188 @@
 
 import { Socket, Server as NetServer, createConnection, createServer } from 'net';
 import { TPromise } from 'vs/base/common/winjs.base';
-import { IDisposable } from 'vs/base/common/lifecycle';
-import Event, { Emitter, once } from 'vs/base/common/event';
+import Event, { Emitter, once, mapEvent } from 'vs/base/common/event';
 import { fromEventEmitter } from 'vs/base/node/event';
-import { ChannelServer, ChannelClient, IMessagePassingProtocol, IChannelServer, IChannelClient, IRoutingChannelClient, IClientRouter, IChannel } from 'vs/base/parts/ipc/common/ipc';
+import { IMessagePassingProtocol, ClientConnectionEvent, IPCServer, IPCClient } from 'vs/base/parts/ipc/common/ipc';
+import { join } from 'path';
+import { tmpdir } from 'os';
+import { generateUuid } from 'vs/base/common/uuid';
 
-function bufferIndexOf(buffer: Buffer, value: number, start = 0) {
-	while (start < buffer.length && buffer[start] !== value) {
-		start++;
+export function generateRandomPipeName(): string {
+	const randomSuffix = generateUuid();
+	if (process.platform === 'win32') {
+		return `\\\\.\\pipe\\vscode-${randomSuffix}-sock`;
+	} else {
+		// Mac/Unix: use socket file
+		return join(tmpdir(), `vscode-${randomSuffix}.sock`);
 	}
-
-	return start;
 }
 
-class Protocol implements IMessagePassingProtocol {
+export class Protocol implements IMessagePassingProtocol {
 
-	private static Boundary = new Buffer([0]);
+	private static _headerLen = 17;
 
-	private _onMessage: Event<any>;
-	get onMessage(): Event<any> { return this._onMessage; }
+	private _onMessage = new Emitter<any>();
 
-	constructor(private socket: Socket) {
-		let buffer = null;
-		const emitter = new Emitter<any>();
-		const onRawData = fromEventEmitter(socket, 'data', data => data);
+	readonly onMessage: Event<any> = this._onMessage.event;
 
-		onRawData((data: Buffer) => {
-			let lastIndex = 0;
-			let index = 0;
+	constructor(private _socket: Socket) {
 
-			while ((index = bufferIndexOf(data, 0, lastIndex)) < data.length) {
-				const dataToParse = data.slice(lastIndex, index);
+		let chunks: Buffer[] = [];
+		let totalLength = 0;
 
-				if (buffer) {
-					emitter.fire(JSON.parse(Buffer.concat([buffer, dataToParse]).toString('utf8')));
-					buffer = null;
-				} else {
-					emitter.fire(JSON.parse(dataToParse.toString('utf8')));
+		const state = {
+			readHead: true,
+			bodyIsJson: false,
+			bodyLen: -1,
+		};
+
+		_socket.on('data', (data: Buffer) => {
+
+			chunks.push(data);
+			totalLength += data.length;
+
+			while (totalLength > 0) {
+
+				if (state.readHead) {
+					// expecting header -> read 17bytes for header
+					// information: `bodyIsJson` and `bodyLen`
+					if (totalLength >= Protocol._headerLen) {
+						const all = Buffer.concat(chunks);
+
+						state.bodyIsJson = all.readInt8(0) === 1;
+						state.bodyLen = all.readInt32BE(1);
+						state.readHead = false;
+
+						const rest = all.slice(Protocol._headerLen);
+						totalLength = rest.length;
+						chunks = [rest];
+
+					} else {
+						break;
+					}
 				}
 
-				lastIndex = index + 1;
-			}
+				if (!state.readHead) {
+					// expecting body -> read bodyLen-bytes for
+					// the actual message or wait for more data
+					if (totalLength >= state.bodyLen) {
 
-			if (index - lastIndex > 0) {
-				const dataToBuffer = data.slice(lastIndex, index);
+						const all = Buffer.concat(chunks);
+						let message = all.toString('utf8', 0, state.bodyLen);
+						if (state.bodyIsJson) {
+							message = JSON.parse(message);
+						}
+						this._onMessage.fire(message);
 
-				if (buffer) {
-					buffer = Buffer.concat([buffer, dataToBuffer]);
-				} else {
-					buffer = dataToBuffer;
+						const rest = all.slice(state.bodyLen);
+						totalLength = rest.length;
+						chunks = [rest];
+
+						state.bodyIsJson = false;
+						state.bodyLen = -1;
+						state.readHead = true;
+
+					} else {
+						break;
+					}
 				}
 			}
 		});
-
-		this._onMessage = emitter.event;
 	}
 
 	public send(message: any): void {
-		try {
-			this.socket.write(JSON.stringify(message));
-			this.socket.write(Protocol.Boundary);
-		} catch (e) {
-			// noop
+
+		// [bodyIsJson|bodyLen|message]
+		// |^header^^^^^^^^^^^|^data^^]
+
+		const header = Buffer.alloc(Protocol._headerLen);
+
+		// ensure string
+		if (typeof message !== 'string') {
+			message = JSON.stringify(message);
+			header.writeInt8(1, 0);
+		}
+		const data = Buffer.from(message);
+		header.writeInt32BE(data.length, 1);
+
+		this._writeSoon(header, data);
+	}
+
+	private _writeBuffer = new class {
+
+		private _data: Buffer[] = [];
+		private _totalLength = 0;
+
+		add(head: Buffer, body: Buffer): boolean {
+			const wasEmpty = this._totalLength === 0;
+			this._data.push(head, body);
+			this._totalLength += head.length + body.length;
+			return wasEmpty;
+		}
+
+		take(): Buffer {
+			const ret = Buffer.concat(this._data, this._totalLength);
+			this._data.length = 0;
+			this._totalLength = 0;
+			return ret;
+		}
+	};
+
+	private _writeSoon(header: Buffer, data: Buffer): void {
+		if (this._writeBuffer.add(header, data)) {
+			setImmediate(() => {
+				// return early if socket has been destroyed in the meantime
+				if (this._socket.destroyed) {
+					return;
+				}
+				// we ignore the returned value from `write` because we would have to cached the data
+				// anyways and nodejs is already doing that for us:
+				// > https://nodejs.org/api/stream.html#stream_writable_write_chunk_encoding_callback
+				// > However, the false return value is only advisory and the writable stream will unconditionally
+				// > accept and buffer chunk even if it has not not been allowed to drain.
+				this._socket.write(this._writeBuffer.take());
+			});
 		}
 	}
 }
 
-class RoutingChannelClient implements IRoutingChannelClient, IDisposable {
+export class Server extends IPCServer {
 
-	private ipcClients: { [id: string]: ChannelClient; };
-	private onClientAdded = new Emitter();
+	private static toClientConnectionEvent(server: NetServer): Event<ClientConnectionEvent> {
+		const onConnection = fromEventEmitter<Socket>(server, 'connection');
 
-	constructor() {
-		this.ipcClients = Object.create(null);
+		return mapEvent(onConnection, socket => ({
+			protocol: new Protocol(socket),
+			onDidClientDisconnect: once(fromEventEmitter<void>(socket, 'close'))
+		}));
 	}
-
-	add(id: string, client: ChannelClient): void {
-		this.ipcClients[id] = client;
-		this.onClientAdded.fire();
-	}
-
-	remove(id: string): void {
-		delete this.ipcClients[id];
-	}
-
-	private getClient(clientId: string): TPromise<IChannelClient> {
-		const getClientFn = (clientId: string, c: (client: IChannelClient) => void): boolean => {
-			let client = this.ipcClients[clientId];
-			if (client) {
-				c(client);
-				return true;
-			}
-			return false;
-		};
-		return new TPromise<IChannelClient>((c, e) => {
-			if (!getClientFn(clientId, c)) {
-				let disposable = this.onClientAdded.event(() => {
-					if (getClientFn(clientId, c)) {
-						disposable.dispose();
-					}
-				});
-			}
-		});
-	}
-
-	getChannel<T extends IChannel>(channelName: string, router: IClientRouter): T {
-		const call = (command: string, arg: any) => {
-			const id = router.routeCall(command, arg);
-			if (!id) {
-				return TPromise.wrapError('Client id should be provided');
-			}
-			return this.getClient(id).then(client => client.getChannel(channelName).call(command, arg));
-		};
-		return { call } as T;
-	}
-
-	dispose() {
-		this.ipcClients = null;
-		this.onClientAdded.dispose();
-	}
-}
-
-// TODO@joao: move multi channel implementation down to ipc
-export class Server implements IChannelServer, IRoutingChannelClient, IDisposable {
-
-	private channels: { [name: string]: IChannel };
-	private router: RoutingChannelClient;
 
 	constructor(private server: NetServer) {
-		this.channels = Object.create(null);
-		this.router = new RoutingChannelClient();
-
-		this.server.on('connection', (socket: Socket) => {
-			const protocol = new Protocol(socket);
-			const onFirstMessage = once(protocol.onMessage);
-
-			onFirstMessage(id => {
-				const channelServer = new ChannelServer(protocol);
-
-				Object.keys(this.channels)
-					.forEach(name => channelServer.registerChannel(name, this.channels[name]));
-
-				const channelClient = new ChannelClient(protocol);
-				this.router.add(id, channelClient);
-
-				socket.once('close', () => {
-					channelClient.dispose();
-					this.router.remove(id);
-					channelServer.dispose();
-				});
-			});
-		});
-	}
-
-	getChannel<T extends IChannel>(channelName: string, router: IClientRouter): T {
-		return this.router.getChannel<T>(channelName, router);
-	}
-
-	registerChannel(channelName: string, channel: IChannel): void {
-		this.channels[channelName] = channel;
+		super(Server.toClientConnectionEvent(server));
 	}
 
 	dispose(): void {
-		this.router.dispose();
-		this.router = null;
-		this.channels = null;
+		super.dispose();
 		this.server.close();
 		this.server = null;
 	}
 }
 
-export class Client implements IChannelClient, IChannelServer, IDisposable {
-
-	private channelClient: ChannelClient;
-	private channelServer: ChannelServer;
+export class Client extends IPCClient {
 
 	private _onClose = new Emitter<void>();
 	get onClose(): Event<void> { return this._onClose.event; }
 
 	constructor(private socket: Socket, id: string) {
-		const protocol = new Protocol(socket);
-		protocol.send(id);
-
-		this.channelClient = new ChannelClient(protocol);
-		this.channelServer = new ChannelServer(protocol);
+		super(new Protocol(socket), id);
 		socket.once('close', () => this._onClose.fire());
 	}
 
-	getChannel<T extends IChannel>(channelName: string): T {
-		return this.channelClient.getChannel(channelName) as T;
-	}
-
-	registerChannel(channelName: string, channel: IChannel): void {
-		this.channelServer.registerChannel(channelName, channel);
-	}
-
 	dispose(): void {
+		super.dispose();
 		this.socket.end();
 		this.socket = null;
-		this.channelClient = null;
-		this.channelServer.dispose();
-		this.channelServer = null;
 	}
 }
 

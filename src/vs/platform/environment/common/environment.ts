@@ -3,10 +3,60 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { ParsedArgs } from 'vs/platform/environment/node/argv';
 import { createDecorator } from 'vs/platform/instantiation/common/instantiation';
 
+export interface ParsedArgs {
+	[arg: string]: any;
+	_: string[];
+	help?: boolean;
+	version?: boolean;
+	wait?: boolean;
+	waitMarkerFilePath?: string;
+	diff?: boolean;
+	add?: boolean;
+	goto?: boolean;
+	'new-window'?: boolean;
+	'unity-launch'?: boolean; // Always open a new window, except if opening the first window or opening a file or folder as part of the launch.
+	'reuse-window'?: boolean;
+	locale?: string;
+	'user-data-dir'?: string;
+	performance?: boolean;
+	'prof-startup'?: string;
+	verbose?: boolean;
+	logExtensionHostCommunication?: boolean;
+	'disable-extensions'?: boolean;
+	'extensions-dir'?: string;
+	extensionDevelopmentPath?: string;
+	extensionTestsPath?: string;
+	debugPluginHost?: string;
+	debugBrkPluginHost?: string;
+	debugId?: string;
+	debugSearch?: string;
+	debugBrkSearch?: string;
+	'list-extensions'?: boolean;
+	'show-versions'?: boolean;
+	'install-extension'?: string | string[];
+	'uninstall-extension'?: string | string[];
+	'enable-proposed-api'?: string | string[];
+	'open-url'?: string | string[];
+	'skip-getting-started'?: boolean;
+	'sticky-quickopen'?: boolean;
+	'disable-telemetry'?: boolean;
+	'export-default-configuration'?: string;
+	'install-source'?: string;
+	'disable-updates'?: string;
+}
+
 export const IEnvironmentService = createDecorator<IEnvironmentService>('environmentService');
+
+export interface IDebugParams {
+	port: number;
+	break: boolean;
+}
+
+export interface IExtensionHostDebugParams extends IDebugParams {
+	debugId: string;
+}
 
 export interface IEnvironmentService {
 	_serviceBrand: any;
@@ -19,16 +69,27 @@ export interface IEnvironmentService {
 	userHome: string;
 	userDataPath: string;
 
+	appNameLong: string;
+	appQuality: string;
 	appSettingsHome: string;
 	appSettingsPath: string;
 	appKeybindingsPath: string;
+	machineUUID: string;
 
+	backupHome: string;
+	backupWorkspacesPath: string;
+
+	workspacesHome: string;
+
+	isExtensionDevelopment: boolean;
 	disableExtensions: boolean;
 	extensionsPath: string;
 	extensionDevelopmentPath: string;
 	extensionTestsPath: string;
 
-	debugExtensionHost: { port: number; break: boolean; };
+	debugExtensionHost: IExtensionHostDebugParams;
+	debugSearch: IDebugParams;
+
 
 	logExtensionHostCommunication: boolean;
 
@@ -36,7 +97,15 @@ export interface IEnvironmentService {
 	verbose: boolean;
 	wait: boolean;
 	performance: boolean;
+	profileStartup: { prefix: string, dir: string } | undefined;
+
+	skipGettingStarted: boolean | undefined;
 
 	mainIPCHandle: string;
 	sharedIPCHandle: string;
+
+	nodeCachedDataDir: string;
+
+	installSource: string;
+	disableUpdates: boolean;
 }
